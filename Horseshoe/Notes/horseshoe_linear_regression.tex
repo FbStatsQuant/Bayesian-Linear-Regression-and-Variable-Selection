@@ -1,0 +1,1480 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in,headheight=15pt]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,array,longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\definecolor{ink}{HTML}{15354A}
+\hypersetup{colorlinks=true,linkcolor=ink,citecolor=ink,urlcolor=ink,
+  pdftitle={Horseshoe Linear Regression and Variable Selection},
+  pdfauthor={Research notes},pdfsubject={Model, Gibbs sampler, and posterior decisions}}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsc{Horseshoe linear regression}}
+\fancyhead[R]{\small Review draft}
+\fancyfoot[C]{\thepage}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt plus 1pt minus 1pt}
+\setlist{itemsep=3pt,topsep=4pt}
+\setcounter{tocdepth}{2}
+\numberwithin{equation}{section}
+\allowdisplaybreaks[1]
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\Var}{\operatorname{Var}}
+\newcommand{\Cov}{\operatorname{Cov}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\IG}{\operatorname{IG}}
+\newcommand{\Ga}{\operatorname{Gamma}}
+\newcommand{\HC}{\operatorname{C}^{+}}
+\newcommand{\Normal}{\mathcal{N}}
+\newcommand{\ind}{\mathbf{1}}
+\newcommand{\given}{\mid}
+\newcommand{\btheta}{\bm{\theta}}
+\newcommand{\bbeta}{\bm{\beta}}
+\newcommand{\blambda}{\bm{\lambda}}
+\newcommand{\bnu}{\bm{\nu}}
+\newcommand{\ones}{\mathbf{1}}
+\newcommand{\trans}{^{\mathsf T}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+\newcommand{\key}[1]{\par\smallskip\textbf{#1}\par\smallskip}
+
+\begin{document}
+\hypersetup{pageanchor=false}
+\begin{titlepage}
+\vspace*{0.65in}
+{\color{ink}\Large Bayesian Linear Regression and Variable Selection\par}
+\vspace{0.45in}
+{\color{ink}\Huge\bfseries Horseshoe Linear Regression\par}
+\vspace{0.16in}
+{\color{ink}\LARGE The model, the Gibbs sampler,\par and variable selection\par}
+\vspace{0.55in}
+{\large Detailed research notes\par}
+{\large Review draft --- October 4, 2026\par}
+\vspace{0.6in}
+\hrule
+\vspace{0.2in}
+\textbf{Purpose.} Develop Gaussian linear regression with a horseshoe prior from
+the likelihood to an implementable Gibbs sampler. Every full conditional is
+derived, the distribution conventions are fixed explicitly, and posterior
+shrinkage is separated from the decision to select variables.
+
+\textbf{Main convention.} The coefficient prior is scaled by the noise variance:
+\(\beta_j\given\sigma^2,\tau^2,\lambda_j^2\sim
+\Normal(0,\sigma^2\tau^2\lambda_j^2)\). The intercept is separate and unpenalized.
+The main derivation uses a proper inverse-gamma prior on \(\sigma^2\), with
+common alternatives explained later.
+
+\textbf{Scope.} These are mathematical and implementation notes, not an empirical
+comparison. Worked quantities are analytic illustrations. No simulated data,
+fitted model, convergence result, or benchmark is reported.
+\vfill
+\small Editable source: \texttt{horseshoe\_linear\_regression.tex}\par
+The bibliography links to the original methodological sources.
+\end{titlepage}
+\pagenumbering{roman}
+\hypersetup{pageanchor=true}
+\begingroup
+\small
+\setlength{\parskip}{0pt}
+\tableofcontents
+\endgroup
+\clearpage
+\pagenumbering{arabic}
+
+\section{The question the horseshoe answers}
+
+Suppose a response may depend on many predictors, but we expect only a small
+number of substantial effects. Ordinary least squares estimates each coefficient
+without using that expectation. When predictors are numerous or correlated,
+the estimates can be unstable; when \(p\geq n\), an unregularized coefficient
+vector may not even be identifiable.
+
+The horseshoe expresses sparsity through a continuous prior. A shared
+\emph{global} scale encourages coefficients to be small, while a separate
+\emph{local} scale lets each coefficient escape strong shrinkage when supported
+by the likelihood. This global--local construction is the central idea of
+Carvalho, Polson, and Scott \cite{carvalho2009,carvalho2010}.
+
+There are three different tasks:
+\begin{enumerate}
+\item \textbf{Estimation:} describe plausible values of each coefficient and
+      of the regression function.
+\item \textbf{Prediction:} describe responses at new predictor values, including
+      both parameter uncertainty and observation noise.
+\item \textbf{Selection:} decide which variables to report or retain, using a
+      stated rule or loss function.
+\end{enumerate}
+A horseshoe posterior directly addresses the first two. The third requires an
+additional decision: the ordinary horseshoe does not assign positive probability
+to any coefficient being exactly zero.
+
+\subsection{Reading guide}
+
+Sections \ref{sec:model}--\ref{sec:shrinkage} explain the model and its shrinkage
+behavior. Sections \ref{sec:augmentation}--\ref{sec:sweep} give the augmented
+posterior and derive the complete Gibbs sweep. Sections \ref{sec:linearalgebra}
+and \ref{sec:hyperparameters} address implementation and prior calibration.
+Sections \ref{sec:inference}--\ref{sec:diagnostics} cover inference, selection,
+and verification. The appendices distinguish alternative parameterizations and
+provide a compact reference sheet.
+
+\subsection{Notation and distribution conventions}
+
+Vectors are columns. In particular, \(y\in\R^n\), \(X\in\R^{n\times p}\),
+and \(\bbeta\in\R^p\). The \(i\)th row of \(X\) is \(x_i\trans\), and
+\(X_j\) denotes its \(j\)th column. The intercept is \(\alpha\in\R\).
+The symbol \(\mid\cdot\) means conditioning on the data, fixed hyperparameters,
+and all current unknowns except the variable being updated.
+
+\begin{center}
+\begin{tabular}{@{}p{0.20\textwidth}p{0.73\textwidth}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\(n,p\) & Number of observations and number of penalized slopes; the intercept is not counted in \(p\). \\
+\(\sigma^2\) & Observation-noise variance; \(\sigma=\sqrt{\sigma^2}>0\). \\
+\(\tau,s_\tau\) & Global shrinkage scale and the fixed scale of its half-Cauchy prior. \\
+\(\lambda_j\) & Local shrinkage scale for slope \(j\). \\
+\(\nu_j,\xi\) & Positive auxiliary variables used to represent half-Cauchy priors. \\
+\(a_\sigma,b_\sigma\) & Shape and inverse-gamma scale for the noise-variance prior. \\
+\(D,A,m\) & Prior variance multiplier, conditional precision multiplier, and conditional coefficient mean. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+We use \(\Normal_k(m,V)\) with \emph{covariance} \(V\), not precision. The
+inverse-gamma convention is
+\begin{equation}\label{eq:ig}
+ Z\sim\IG(a,b)
+ \quad\Longleftrightarrow\quad
+ p(z)=\frac{b^a}{\Gamma(a)}z^{-a-1}\exp(-b/z),\qquad z>0.
+\end{equation}
+Thus \(1/Z\sim\Ga(a,\text{rate}=b)\). If software uses gamma shape and scale,
+generate \(G\sim\Ga(a,\text{scale}=1/b)\) and return \(1/G\).
+The mean \(b/(a-1)\) exists only when \(a>1\); the mode is \(b/(a+1)\).
+
+A half-Cauchy distribution here is parameterized by its \emph{scale} \(s\):
+\begin{equation}\label{eq:hc}
+ T\sim\HC(0,s),\qquad
+ p(t)=\frac{2s}{\pi(s^2+t^2)},\qquad t>0.
+\end{equation}
+The symbols \(\tau\) and \(\lambda_j\) are standard-deviation multipliers;
+\(\tau^2\) and \(\lambda_j^2\) are the variables sampled in the augmented Gibbs
+scheme. Confusing a scale with its square changes the model.
+
+\section{The regression model and the prior}\label{sec:model}
+
+\subsection{Likelihood}
+
+Assume conditionally independent, homoscedastic Gaussian errors:
+\begin{align}
+ y_i &= \alpha+x_i\trans\bbeta+\varepsilon_i,
+ & \varepsilon_i\given\sigma^2&\overset{\mathrm{iid}}\sim\Normal(0,\sigma^2),\\
+ y\given\alpha,\bbeta,\sigma^2
+ &\sim\Normal_n(\alpha\ones_n+X\bbeta,\sigma^2 I_n).
+\end{align}
+Consequently,
+\begin{equation}\label{eq:likelihood}
+ p(y\given\alpha,\bbeta,\sigma^2)
+ =(2\pi\sigma^2)^{-n/2}
+ \exp\left\{-\frac{\norm{y-\alpha\ones_n-X\bbeta}^2}{2\sigma^2}\right\}.
+\end{equation}
+This likelihood is an assumption about the errors, not a requirement that
+predictors themselves be normally distributed.
+
+\subsection{The noise-scaled horseshoe hierarchy}
+
+Our main model is
+\begin{align}
+ \beta_j\given\sigma^2,\tau^2,\lambda_j^2
+ &\overset{\mathrm{ind}}\sim\Normal(0,\sigma^2\tau^2\lambda_j^2),
+ &&j=1,\ldots,p,\label{eq:coefprior}\\
+ \lambda_j&\overset{\mathrm{iid}}\sim\HC(0,1),
+ &\tau&\sim\HC(0,s_\tau),\label{eq:scalepriors}\\
+ \sigma^2&\sim\IG(a_\sigma,b_\sigma),
+ &p(\alpha)&\propto1,\label{eq:otherpriors}
+\end{align}
+where \(a_\sigma,b_\sigma,s_\tau>0\). The scale priors and the noise-variance
+prior are mutually independent. The slopes are independent \emph{conditional}
+on their scales and \(\sigma^2\); they are not generally independent after
+integrating out the shared scales.
+
+Define
+\begin{equation}\label{eq:D}
+ D=\tau^2\diag(\lambda_1^2,\ldots,\lambda_p^2),
+ \qquad \bbeta\given\sigma^2,D\sim\Normal_p(0,\sigma^2D).
+\end{equation}
+The prior precision for coefficient \(j\) is
+\(1/(\sigma^2\tau^2\lambda_j^2)\). Small \(\tau\) encourages shrinkage
+throughout the model. A large \(\lambda_j\) weakens the penalty for its own
+coefficient. A small \(\lambda_j\) strengthens that penalty.
+
+The conventional unit global scale is \(s_\tau=1\). It is a transparent
+reference choice, not a universal calibration. Section \ref{sec:hyperparameters}
+explains how sample size, predictor scaling, and an anticipated degree of
+sparsity affect a more informed choice.
+
+\key{A notation boundary for this project}
+The \(\lambda_j\)'s in these notes are horseshoe local scales with half-Cauchy
+priors. They are not the lambda parameter of a quantile-regression sampler.
+The project's Gamma\((1,\text{rate}=\sqrt n)\) convention for that different
+parameter does not replace the horseshoe hierarchy.
+
+\subsection{Centering, scaling, and the intercept}
+
+Predictor units affect the meaning of a prior on coefficients. Unless units
+carry a reason for unequal prior scales, center each nonconstant predictor and
+divide it by a recorded scale. One precise convention is
+\begin{equation}\label{eq:standardize}
+ \bar x_j=\frac1n\sum_i x_{ij}^{\rm raw},\qquad
+ s_j^2=\frac1n\sum_i(x_{ij}^{\rm raw}-\bar x_j)^2,\qquad
+ x_{ij}=\frac{x_{ij}^{\rm raw}-\bar x_j}{s_j}.
+\end{equation}
+Then \(\ones_n\trans X=0\) and \(X_j\trans X_j=n\). Using sample standard
+deviation instead gives \(X_j\trans X_j=n-1\); either is valid if used
+consistently. Constant columns must be removed or handled separately.
+
+An intercept is an overall baseline, not a candidate sparse predictor. We
+therefore keep it outside \(D\). Under centered predictors,
+\(\alpha\given\cdot\sim\Normal(\bar y,\sigma^2/n)\). Keeping this draw
+retains baseline uncertainty for prediction.
+
+Centering \(y\) and setting its intercept to zero is not automatically
+equivalent to integrating out an unknown intercept. With a flat intercept
+prior, exact integration reduces the residual dimension from \(n\) to
+\(n-1\). Appendix \ref{app:intercept} gives the resulting formulas. The main
+sampler avoids ambiguity by sampling \(\alpha\) explicitly.
+
+For validation or prediction, estimate preprocessing constants using training
+data only, and apply those same constants to held-out observations. If the
+response was also transformed as \(y'=(y^{\rm raw}-c_y)/s_y\), then
+\begin{equation}\label{eq:backtransform}
+ \beta_j^{\rm raw}=\frac{s_y}{s_j}\beta_j,\qquad
+ \alpha^{\rm raw}=c_y+s_y\alpha-
+       \sum_j\frac{s_y\beta_j\bar x_j}{s_j},\qquad
+ \sigma^{\rm raw}=s_y\sigma.
+\end{equation}
+Apply these transformations to every posterior draw, so uncertainty transforms
+with the parameters.
+
+\subsection{What makes this prior a horseshoe?}
+
+Conditional normality makes computation tractable. Mixing that normal over a
+half-Cauchy local scale gives a marginal coefficient density with an unbounded
+spike at zero and heavy tails. For fixed positive \(\tau,\sigma\), it remains
+a proper continuous density. An infinite density value at one point is not a
+positive probability at that point.
+
+The spike supports estimates close to zero; the tails accommodate large
+effects without a Gaussian prior's strong tail penalty. This does not guarantee
+that a weak signal is retained or that a particular correlated predictor is
+identified. The likelihood and the global-scale prior still matter.
+
+\section{Understanding shrinkage through an orthogonal design}\label{sec:shrinkage}
+
+\subsection{A one-coordinate normal calculation}
+
+For intuition, suppose the predictor columns are mutually orthogonal and
+orthogonal to the intercept. Let \(c_j=X_j\trans X_j>0\). The least-squares
+coordinate is
+\[
+ \widehat\beta_j=\frac{X_j\trans(y-\alpha\ones_n)}{c_j},
+ \qquad
+ \widehat\beta_j\given\beta_j,\sigma^2\sim
+ \Normal\left(\beta_j,\frac{\sigma^2}{c_j}\right).
+\]
+Combining this normal likelihood with \eqref{eq:coefprior} adds their
+precisions. Define the shrinkage factor
+\begin{equation}\label{eq:kappa}
+ \kappa_j=\frac{1}{1+c_j\tau^2\lambda_j^2}.
+\end{equation}
+The conditional posterior becomes
+\begin{equation}\label{eq:orthposterior}
+ \beta_j\given\cdot\sim
+ \Normal\left((1-\kappa_j)\widehat\beta_j,
+      \frac{\sigma^2}{c_j}(1-\kappa_j)\right).
+\end{equation}
+Thus \(\kappa_j\) near one means strong shrinkage; \(\kappa_j\) near zero
+means weak shrinkage. The noise variance cancels out of \(\kappa_j\) because
+the likelihood and coefficient prior share the factor \(\sigma^2\).
+
+For a unit-length column, \(c_j=1\). Under \eqref{eq:standardize}, \(c_j=n\).
+Using \(1/(1+\tau^2\lambda_j^2)\) indiscriminately in standardized regression
+misses this factor of \(n\).
+
+\subsection{Why the name? A transformation of the local scale}
+
+For a unit-information coordinate with \(c_j=1\) and fixed \(\tau=1\),
+\(\lambda_j\sim\HC(0,1)\) implies
+\(\kappa_j=1/(1+\lambda_j^2)\sim\operatorname{Beta}(1/2,1/2)\).
+Its density is high near both endpoints. One end represents substantial
+shrinkage and the other little shrinkage.
+
+More generally put \(t=\sqrt{c_j}\tau\). Inverting
+\(\kappa=1/(1+t^2\lambda^2)\) and including the Jacobian gives
+\begin{equation}\label{eq:kappadensity}
+ p(\kappa\given\tau)=
+ \frac{t}{\pi\sqrt{\kappa(1-\kappa)}\{1+(t^2-1)\kappa\}},
+ \qquad 0<\kappa<1.
+\end{equation}
+This is a \emph{prior} density at fixed \(\tau\). Data change the posterior
+distribution of \(\kappa\); it is not a prior inclusion probability.
+
+\subsection{An analytic illustration}
+
+Take an orthogonal column with \(c_j=100\), and hold \(\tau=0.05\) fixed.
+Then \(c_j\tau^2=0.25\). The following values are direct substitutions in
+\eqref{eq:kappa}; they are not fitted estimates or simulation results.
+\begin{center}
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+Local scale \(\lambda_j\) & \(c_j\tau^2\lambda_j^2\) & \(\kappa_j\) & Fraction retained \(1-\kappa_j\)\\
+\midrule
+0.2 & 0.01 & 0.9901 & 0.0099\\
+1   & 0.25 & 0.8000 & 0.2000\\
+10  & 25   & 0.0385 & 0.9615\\
+\bottomrule
+\end{tabular}
+\end{center}
+The same global scale can nearly eliminate one coordinate and preserve most
+of another. In actual inference the scales are random and must be averaged
+over, rather than fixed at convenient values.
+
+\subsection{The limitation with correlated predictors}
+
+For a general design, the conditional mean is
+\((X\trans X+D^{-1})^{-1}X\trans(y-\alpha\ones_n)\). Off-diagonal entries of
+\(X\trans X\) couple the coefficients. There is generally no exact formula
+that independently multiplies each ordinary least-squares coefficient by
+\(1-\kappa_j\).
+
+In particular, two nearly interchangeable predictors can trade explanatory
+roles across posterior draws. Their joint contribution may be stable while
+their individual coefficients remain uncertain. Shrinkage factors remain
+useful scale summaries, but their coordinatewise interpretation is exact only
+in the orthogonal setting.
+
+\section{Turning half-Cauchy priors into conjugate updates}\label{sec:augmentation}
+
+\subsection{The auxiliary-variable identity}
+
+The Gibbs sampler uses the inverse-gamma representation employed by Makalic
+and Schmidt \cite{makalic2016}. For any \(s>0\), introduce \(V>0\) and write
+\begin{equation}\label{eq:identity}
+ Z\given V\sim\IG(1/2,1/V),\qquad
+ V\sim\IG(1/2,1/s^2).
+\end{equation}
+Then \(\sqrt Z\sim\HC(0,s)\).
+
+To verify the identity, retain all factors that depend on \(z\) or \(v\):
+\[
+ p(z,v)=\frac{1}{\pi s}\,z^{-3/2}v^{-2}
+       \exp\left\{-\frac{1/z+1/s^2}{v}\right\}.
+\]
+For \(C>0\), substitution \(u=C/v\) gives
+\(\int_0^\infty v^{-2}e^{-C/v}\,dv=1/C\). Hence
+\begin{equation}
+ p(z)=\frac{1}{\pi s}\frac{z^{-3/2}}{1/z+1/s^2}
+     =\frac{s}{\pi\sqrt z(s^2+z)}.
+\end{equation}
+Setting \(z=t^2\), the Jacobian is \(2t\), so
+\(p(t)=2s/\{\pi(s^2+t^2)\}\), exactly \eqref{eq:hc}.
+
+The auxiliary variable has not approximated or replaced the half-Cauchy.
+Integrating it out recovers the original prior exactly. Its purpose is to make
+the conditional distributions easy to sample.
+
+\subsection{The augmented horseshoe model}
+
+Apply \eqref{eq:identity} independently to every local scale and once to the
+global scale:
+\begin{align}
+ \lambda_j^2\given\nu_j&\sim\IG(1/2,1/\nu_j),
+ &\nu_j&\sim\IG(1/2,1),\label{eq:localaug}\\
+ \tau^2\given\xi&\sim\IG(1/2,1/\xi),
+ &\xi&\sim\IG(1/2,1/s_\tau^2).\label{eq:globalaug}
+\end{align}
+Together with the Gaussian likelihood, coefficient prior, and
+\eqref{eq:otherpriors}, this is the model sampled below. In this chosen
+parameterization, \(s_\tau\) appears in the prior on \(\xi\), and later in
+the full conditional for \(\xi\). Moving it into a different update without
+redefining the augmentation would be an error.
+
+The variables \(\nu_j\) and \(\xi\) are computational devices. They are
+neither regression coefficients nor indicators that a predictor is included.
+They can be omitted from scientific summaries, but must be maintained in the
+chain state if these conditional updates are used.
+
+\section{The posterior kernel and a recipe for deriving conditionals}\label{sec:kernel}
+
+Let \(r=y-\alpha\ones_n-X\bbeta\). Up to constants independent of all
+unknowns, the augmented joint posterior density with respect to
+\(d\alpha\,d\bbeta\,d\sigma^2\,d\tau^2\,d\blambda^2\,d\bnu\,d\xi\) is
+\begin{align}\label{eq:jointkernel}
+ \pi(\alpha,\bbeta,\sigma^2,\tau^2,\blambda^2,\bnu,\xi\given y,X)
+ &\propto
+ (\sigma^2)^{-n/2}\exp\left(-\frac{r\trans r}{2\sigma^2}\right)\nonumber\\
+ &\quad\times(\sigma^2)^{-p/2}(\tau^2)^{-p/2}
+ \prod_{j=1}^p(\lambda_j^2)^{-1/2}
+ \exp\left(-\sum_j\frac{\beta_j^2}{2\sigma^2\tau^2\lambda_j^2}\right)\nonumber\\
+ &\quad\times(\sigma^2)^{-a_\sigma-1}\exp(-b_\sigma/\sigma^2)\nonumber\\
+ &\quad\times\prod_{j=1}^p
+ \left[\nu_j^{-1/2}(\lambda_j^2)^{-3/2}
+       \exp\left(-\frac{1}{\nu_j\lambda_j^2}\right)
+       \nu_j^{-3/2}\exp(-1/\nu_j)\right]\nonumber\\
+ &\quad\times\xi^{-1/2}(\tau^2)^{-3/2}
+       \exp\left(-\frac{1}{\xi\tau^2}\right)
+       \xi^{-3/2}\exp\left(-\frac{1}{s_\tau^2\xi}\right).
+\end{align}
+The flat intercept prior contributes no factor. Fixed factors such as
+\((s_\tau^2)^{-1/2}\) can be suppressed here.
+
+To derive a full conditional, keep only factors involving the variable being
+updated, holding all other variables fixed. For inverse-gamma updates,
+identify the exponent of the variable and the coefficient of its reciprocal.
+For normal updates, complete a quadratic square.
+
+For example, the factor \(\nu_j^{-1/2}\) comes from the normalization of
+\(\lambda_j^2\given\nu_j\). It cannot be discarded when updating \(\nu_j\).
+Likewise, \((\sigma^2)^{-p/2}\) in the coefficient prior is essential when
+updating \(\sigma^2\). Many incorrect samplers arise from treating a
+normalizing constant as constant in the wrong variable.
+
+\section{Derivation of every full conditional}\label{sec:conditionals}
+
+\subsection{Intercept: one unpenalized normal draw}\label{sec:alpha}
+
+Write \(z=y-X\bbeta\) and \(\bar z=n^{-1}\ones_n\trans z\). Then
+\[
+ \sum_i(z_i-\alpha)^2
+ =\sum_i(z_i-\bar z)^2+n(\alpha-\bar z)^2.
+\]
+Only the last term involves \(\alpha\). With its flat prior,
+\begin{equation}\label{eq:alpha}
+ \boxed{\alpha\given\cdot\sim\Normal\left(
+       \frac{\ones_n\trans(y-X\bbeta)}{n},\frac{\sigma^2}{n}\right).}
+\end{equation}
+For centered \(X\), the mean is simply \(\bar y\). If instead
+\(\alpha\sim\Normal(m_\alpha,v_\alpha)\), independent of \(\sigma^2\), replace
+the variance by \(V_\alpha=(n/\sigma^2+1/v_\alpha)^{-1}\) and the mean by
+\(V_\alpha\{\ones_n\trans(y-X\bbeta)/\sigma^2+m_\alpha/v_\alpha\}\).
+This independent proper intercept prior does not add a power of \(\sigma^2\).
+
+\subsection{Regression coefficients: a multivariate normal block}
+
+Set \(\widetilde y=y-\alpha\ones_n\). The terms involving \(\bbeta\) are
+\[
+ \pi(\bbeta\given\cdot)\propto
+ \exp\left\{-\frac{1}{2\sigma^2}
+   \left[(\widetilde y-X\bbeta)\trans(\widetilde y-X\bbeta)
+          +\bbeta\trans D^{-1}\bbeta\right]\right\}.
+\]
+Expand the quadratic and define
+\begin{equation}\label{eq:A}
+ A=X\trans X+D^{-1},\qquad b=X\trans\widetilde y,\qquad m=A^{-1}b.
+\end{equation}
+Because \(Am=b\), completing the square gives
+\[
+ \bbeta\trans A\bbeta-2\bbeta\trans b
+ =(\bbeta-m)\trans A(\bbeta-m)-m\trans Am.
+\]
+The final term is constant in \(\bbeta\), and therefore
+\begin{equation}\label{eq:beta}
+ \boxed{\bbeta\given\cdot\sim\Normal_p(m,\sigma^2 A^{-1}).}
+\end{equation}
+For any nonzero \(v\),
+\(v\trans Av=\norm{Xv}^2+\sum_jv_j^2/(\tau^2\lambda_j^2)>0\).
+Thus \(A\) is positive definite for finite positive scales, even if
+\(X\trans X\) is singular. The conditional normal distribution is well
+defined for \(p>n\). This is a statement about regularization, not a claim
+that the data identify every coefficient separately.
+
+Drawing the entire vector as a block respects its conditional dependence.
+Replacing the draw by \(m\) would discard posterior variability and cease to
+be a Gibbs sampler. Section \ref{sec:linearalgebra} describes how to draw this
+normal without computing a matrix inverse.
+
+\subsection{Noise variance: likelihood plus coefficient-prior contribution}
+
+Define the two nonnegative sums
+\begin{equation}\label{eq:RSSQ}
+ R=\norm{y-\alpha\ones_n-X\bbeta}^2,\qquad
+ Q=\bbeta\trans D^{-1}\bbeta
+   =\sum_{j=1}^p\frac{\beta_j^2}{\tau^2\lambda_j^2}.
+\end{equation}
+Combining the likelihood, coefficient-prior normalization, and noise prior,
+\[
+ \pi(\sigma^2\given\cdot)\propto
+ (\sigma^2)^{-\{a_\sigma+(n+p)/2\}-1}
+ \exp\left\{-\frac{b_\sigma+(R+Q)/2}{\sigma^2}\right\}.
+\]
+Comparison with \eqref{eq:ig} yields
+\begin{equation}\label{eq:sigma}
+ \boxed{\sigma^2\given\cdot\sim
+ \IG\left(a_\sigma+\frac{n+p}{2},\ b_\sigma+\frac{R+Q}{2}\right).}
+\end{equation}
+The \(p/2\) contribution is required because the prior variance of each of
+the \(p\) slopes contains \(\sigma^2\). The term \(Q\) is required for the
+same reason. The intercept contributes neither an extra \(1/2\) nor an
+intercept penalty because its prior is flat. The likelihood still contributes
+\(n/2\), since \(\alpha\) is conditioned on here, not integrated out.
+
+\subsection{Local variance multiplier for each coefficient}
+
+For \(\ell_j=\lambda_j^2\), the coefficient prior contributes
+\(\ell_j^{-1/2}\exp\{-\beta_j^2/(2\sigma^2\tau^2\ell_j)\}\), and the
+augmented prior contributes
+\(\ell_j^{-3/2}\exp\{-1/(\nu_j\ell_j)\}\). Hence
+\[
+ \pi(\ell_j\given\cdot)\propto\ell_j^{-2}
+ \exp\left\{-\frac{\nu_j^{-1}+\beta_j^2/(2\sigma^2\tau^2)}{\ell_j}\right\},
+\]
+which is
+\begin{equation}\label{eq:lambda}
+ \boxed{\lambda_j^2\given\cdot\sim
+ \IG\left(1,\ \frac1{\nu_j}+\frac{\beta_j^2}{2\sigma^2\tau^2}\right),
+ \qquad j=1,\ldots,p.}
+\end{equation}
+These updates are conditionally independent across \(j\). A large
+\(\beta_j^2/(\sigma^2\tau^2)\) increases the inverse-gamma scale and allows
+a larger local variance. This is how a coefficient can resist global
+shrinkage. It is a stochastic update, not a deterministic monotone rule.
+
+The conditional shape is one. Its mean is infinite, so an argument based on
+the ``conditional mean of \(\lambda_j^2\)'' is not available. Simulating this
+proper distribution is nevertheless well defined. Scale medians, log-scales,
+and shrinkage factors are often more interpretable summaries.
+
+\subsection{Global variance multiplier}
+
+Put \(t=\tau^2\). All \(p\) coefficient priors contribute a total factor
+\(t^{-p/2}\), while the augmented global prior contributes \(t^{-3/2}\).
+Thus
+\[
+ \pi(t\given\cdot)\propto
+ t^{-(p+3)/2}
+ \exp\left\{-\frac{\xi^{-1}+
+          \sum_j\beta_j^2/(2\sigma^2\lambda_j^2)}{t}\right\}.
+\]
+Matching the power \(-a-1\) gives
+\begin{equation}\label{eq:tau}
+ \boxed{\tau^2\given\cdot\sim
+ \IG\left(\frac{p+1}{2},\ \frac1\xi+
+           \frac1{2\sigma^2}\sum_{j=1}^p\frac{\beta_j^2}{\lambda_j^2}\right).}
+\end{equation}
+Unlike a local update, this update aggregates information from all slopes.
+Large local scales can accommodate a few substantial coefficients while
+allowing the global scale to remain small for the others.
+
+\subsection{Auxiliary variables}
+
+For \(\nu_j\), the normalization in
+\(\lambda_j^2\given\nu_j\) supplies \(\nu_j^{-1/2}\). Multiplying by
+its own prior gives
+\[
+ \pi(\nu_j\given\cdot)\propto
+ \nu_j^{-2}\exp\left\{-\frac{1+1/\lambda_j^2}{\nu_j}\right\}.
+\]
+Similarly,
+\[
+ \pi(\xi\given\cdot)\propto
+ \xi^{-2}\exp\left\{-\frac{1/s_\tau^2+1/\tau^2}{\xi}\right\}.
+\]
+Therefore,
+\begin{align}
+ \boxed{\nu_j\given\cdot\sim\IG\left(1,\ 1+\frac1{\lambda_j^2}\right),}
+ &\qquad j=1,\ldots,p,\label{eq:nu}\\
+ \boxed{\xi\given\cdot\sim\IG\left(1,\ \frac1{s_\tau^2}+\frac1{\tau^2}\right).}
+ &\label{eq:xi}
+\end{align}
+When \(s_\tau=1\), the last scale reduces to \(1+1/\tau^2\).
+No Metropolis acceptance step and no slice-sampling subroutine is needed for
+any of these updates in the stated Gaussian model.
+
+\section{How the Gibbs sampler works}\label{sec:sweep}
+
+\subsection{From conditional draws to a joint posterior sample}
+
+A Gibbs sampler repeatedly replaces one block of unknowns by a draw from its
+conditional posterior given the current remaining blocks. If the chain is
+already distributed according to the joint posterior, any one exact
+conditional update leaves that joint distribution unchanged. A sequence of
+such updates also leaves it unchanged.
+
+This invariance identifies the target distribution; it does not say that a
+chain started arbitrarily is immediately at stationarity. Nor does it make
+successive draws independent. Appropriate regularity and adequate exploration
+are needed for the empirical distribution of a long run to approximate the
+posterior. Diagnostics assess finite-run behavior, not just the correctness
+of the formulas.
+
+\subsection{A complete sweep with explicit update order}
+
+Store
+\(\{\alpha,\bbeta,\sigma^2,\blambda^2,\tau^2,\bnu,\xi\}\).
+Choose finite initial values with every variance and auxiliary variable
+strictly positive. For example, start \(\alpha\) near \(\bar y\),
+\(\bbeta\) near zero, \(\lambda_j^2=\nu_j=1\), a positive noise variance,
+\(\tau^2=s_\tau^2\), and \(\xi=1\). These are starting values, not prior
+draws or estimated hyperparameters. Use dispersed starts across chains.
+
+At iteration \(t=1,\ldots,T\), carry out:
+\begin{enumerate}[label=\textbf{\arabic*.},leftmargin=*]
+\item \textbf{Update the intercept.} Draw \(\alpha^{(t)}\) using
+\eqref{eq:alpha} with \(\bbeta^{(t-1)},\sigma^{2(t-1)}\).
+
+\item \textbf{Update all slopes together.} Form \(D\) from
+\(\tau^{2(t-1)},\blambda^{2(t-1)}\), set
+\(\widetilde y=y-\alpha^{(t)}\ones_n\), and draw \(\bbeta^{(t)}\)
+from \eqref{eq:beta} with \(\sigma^{2(t-1)}\).
+
+\item \textbf{Update the noise variance.} Evaluate \(R\) using the new
+\(\alpha^{(t)},\bbeta^{(t)}\), and \(Q\) using the still-current old scales.
+Draw \(\sigma^{2(t)}\) from \eqref{eq:sigma}.
+
+\item \textbf{Update local variances.} For every \(j\), draw
+\(\lambda_j^{2(t)}\) from \eqref{eq:lambda} with
+\(\beta_j^{(t)},\sigma^{2(t)},\tau^{2(t-1)},\nu_j^{(t-1)}\).
+The local draws can be generated as one conditionally independent batch.
+
+\item \textbf{Update the global variance.} Draw \(\tau^{2(t)}\) from
+\eqref{eq:tau} using \(\bbeta^{(t)},\sigma^{2(t)},\blambda^{2(t)}\)
+and \(\xi^{(t-1)}\).
+
+\item \textbf{Update the auxiliary variables.} Draw \(\nu_j^{(t)}\)
+from \eqref{eq:nu} using \(\lambda_j^{2(t)}\), and draw \(\xi^{(t)}\)
+from \eqref{eq:xi} using \(\tau^{2(t)}\).
+
+\item \textbf{Save the completed state.} After the chosen initial transient,
+store draws and any desired predictive or shrinkage summaries. Save
+checkpoints separately if the run must be restartable.
+\end{enumerate}
+Each update uses the most recently available values. Other sequential scan
+orders can be valid, but updating every block simultaneously using only the
+previous iteration's values is generally not the same Gibbs transition and
+need not preserve the posterior.
+
+\subsection{Why the updates adapt to sparsity}
+
+The coefficient draw combines data fit with the present penalties. The local
+updates then accommodate the magnitudes of individual coefficients. The
+global update adjusts the overall scale after accounting for those local
+exceptions. Finally, the auxiliary updates keep the scale-mixture
+representation consistent with the intended half-Cauchy priors.
+
+This feedback repeats throughout the run. One iteration is not a fitted
+answer; the posterior distribution is represented by the retained collection
+of complete states. A small coefficient at one iteration does not mean that
+the variable has been permanently removed.
+
+\subsection{An implementation skeleton}
+
+The following is language-neutral pseudocode. \texttt{IGdraw(a,b)} follows
+\eqref{eq:ig}, and \texttt{NormalBlock} performs the random draw in
+\eqref{eq:beta}, not just its conditional mean.
+\begin{quote}\small
+\begin{verbatim}
+precompute XtX = transpose(X) * X, Xty = transpose(X) * y
+precompute Xt1 = transpose(X) * ones(n)
+initialize alpha, beta, sigma2, lambda2, tau2, nu, xi
+for iteration = 1,...,T:
+    alpha = Normal(mean(y - X * beta), sigma2 / n)
+    d = tau2 * lambda2
+    A = XtX + diag(1 / d)
+    b = Xty - alpha * Xt1
+    beta = NormalBlock(A, b, sigma2)
+    residual = y - alpha * ones(n) - X * beta
+    R = dot(residual, residual)
+    Q = sum(beta^2 / d)
+    sigma2 = IGdraw(a_sigma + (n+p)/2, b_sigma + (R+Q)/2)
+    lambda2 = IGdraw(1, 1/nu + beta^2/(2*sigma2*tau2))
+    tau2 = IGdraw((p+1)/2, 1/xi + sum(beta^2/lambda2)/(2*sigma2))
+    nu = IGdraw(1, 1 + 1/lambda2)
+    xi = IGdraw(1, 1/s_tau^2 + 1/tau2)
+    save completed state if retained
+\end{verbatim}
+\end{quote}
+Arithmetic on vectors is elementwise except for explicit matrix products.
+The second argument of \texttt{Normal} above is a variance. For \(p\gg n\),
+the next section replaces the \(p\times p\) block construction, so
+\(X\trans X\) need not be stored.
+
+\section{Sampling the Gaussian block accurately and efficiently}\label{sec:linearalgebra}
+
+\subsection{Cholesky sampling when the coefficient dimension is manageable}
+
+Although \eqref{eq:beta} is written using \(A^{-1}\), implementation should
+use linear solves. Let \(A=LL\trans\), where \(L\) is lower triangular.
+First solve
+\[
+ Lq=b,\qquad L\trans m=q.
+\]
+Draw \(z\sim\Normal_p(0,I_p)\) and solve \(L\trans v=z\). Return
+\begin{equation}\label{eq:choldraw}
+ \bbeta=m+\sigma v.
+\end{equation}
+Indeed,
+\[
+ \Cov(v)=L^{-\mathsf T}I_pL^{-1}=(LL\trans)^{-1}=A^{-1}.
+\]
+The transpose matters. Solving \(Lv=z\) instead would generally give
+\(L^{-1}L^{-\mathsf T}\), which is not \(A^{-1}\). If a software package
+returns an upper-triangular factor \(U\) with \(A=U\trans U\), solve
+\(Uv=z\) instead.
+
+For a dense design, precomputing \(X\trans X\) costs \(O(np^2)\); the
+factorization then costs \(O(p^3)\) per sweep, with \(O(p^2)\) storage for
+the precision matrix. The changing scales require updating its diagonal and
+refactorizing. The factorization can also supply a log determinant if needed:
+\(\log|A|=2\sum_j\log L_{jj}\).
+
+\subsection{An exact observation-space draw when \texorpdfstring{\(p\)}{p} is large}
+
+Bhattacharya, Chakraborty, and Mallick \cite{bhattacharya2016} give an exact
+Gaussian sampling method that can exploit \(n\ll p\). Here is its form for
+our parameterization. Condition on \(\alpha,\sigma^2,D\) and put
+\(H=I_n+XDX\trans\).
+\begin{enumerate}
+\item Draw independently \(u\sim\Normal_p(0,D)\) and
+      \(\delta\sim\Normal_n(0,I_n)\).
+\item Form \(v=Xu+\delta\).
+\item Solve \(Hw=\widetilde y/\sigma-v\).
+\item Return \(\bbeta=\sigma(u+DX\trans w)\).
+\end{enumerate}
+All normal variables in this construction are freshly drawn each sweep.
+With diagonal \(D\), generate \(u_j=\sqrt{D_{jj}}z_j\) using independent
+standard normals. Multiplication by \(D\) is a vector scaling operation;
+there is no reason to construct a dense diagonal matrix.
+
+To see why the draw is correct, let \(K=DX\trans H^{-1}\). Its mean is
+\(K\widetilde y\), and the Woodbury identity gives
+\begin{equation}\label{eq:woodbury}
+ A^{-1}=D-DX\trans H^{-1}XD,
+ \qquad A^{-1}X\trans=DX\trans H^{-1}=K.
+\end{equation}
+Also \(\Cov(u,v)=DX\trans\) and \(\Var(v)=H\). Consequently,
+\[
+ \Var(u-Kv)=D-KXD-DX\trans K\trans+KHK\trans
+           =D-DX\trans H^{-1}XD=A^{-1}.
+\]
+Multiplication by \(\sigma\) gives precisely the mean and covariance in
+\eqref{eq:beta}. This is a different way to sample the same conditional,
+not an approximation to it.
+
+For a dense design, forming \(XDX\trans\) costs \(O(n^2p)\) and its
+factorization costs \(O(n^3)\). Storage is \(O(np+n^2)\), including the
+design matrix. Thus ``linear in \(p\)'' assumes \(n\) is fixed; it is not
+linear in both dimensions. For very large scales, cancellation in the final
+update can still cause numerical trouble, so monitor solver accuracy.
+
+\subsection{A coordinatewise alternative}
+
+For completeness, each coefficient can also be updated alone. Let
+\(r_{-j}=y-\alpha\ones_n-\sum_{k\ne j}X_k\beta_k\) and
+\(a_j=X_j\trans X_j+1/(\tau^2\lambda_j^2)\). Then
+\begin{equation}
+ \beta_j\given\bbeta_{-j},\cdot\sim
+ \Normal\left(\frac{X_j\trans r_{-j}}{a_j},\frac{\sigma^2}{a_j}\right).
+\end{equation}
+A sequential coordinate sweep is valid and can use inexpensive residual
+updates. With correlated predictors, however, the chain may move slowly
+along directions that require coordinated changes in several coefficients.
+A block draw often improves mixing even when it has a larger cost per sweep.
+
+\subsection{Numerical details that affect correctness}
+
+\begin{itemize}
+\item \textbf{Use the correct gamma convention.} To draw \(Z\sim\IG(a,b)\),
+one option is \(G\sim\Ga(a,\text{rate}=1)\), then \(Z=b/G\).
+This avoids ambiguities in a library's second parameter. Finite-precision
+underflow or overflow still requires explicit detection.
+\item \textbf{Record scales on the log scale.} The horseshoe can explore very
+small and very large positive scales. Log-scale traces expose this behavior
+more clearly. Stable evaluation of sums or products may be needed before
+forming reciprocals.
+\item \textbf{Do not silently clip.} Truncating \(\tau\), \(\lambda_j\),
+or their reciprocals at arbitrary bounds changes the transition and generally
+the target. If a truncated prior is intended, specify it and derive the
+corresponding sampler.
+\item \textbf{Distinguish a numerical failure from an ill-defined model.}
+At finite positive scales, \(A\) is positive definite mathematically. A
+failed Cholesky factorization can indicate overflow, lost symmetry, severe
+conditioning, or a programming error. Unreported diagonal jitter is an
+unreported change to the draw.
+\item \textbf{Keep the linear algebra auditable.} Reuse fixed cross-products,
+check relative solve residuals, and record which Gaussian sampler is used.
+Avoid explicit inverses and avoid rounding coefficients during the chain.
+\end{itemize}
+
+\section{Choosing prior scales and checking their meaning}\label{sec:hyperparameters}
+
+\subsection{Calibrating global shrinkage to anticipated sparsity}
+
+Let \(p_0\) be a plausible number of substantial effects, with \(0<p_0<p\).
+Under an orthogonal design with common squared column norm \(c\), define
+the effective number of unshrunk coordinates as
+\begin{equation}\label{eq:meff}
+ m_{\rm eff}=\sum_{j=1}^p(1-\kappa_j).
+\end{equation}
+This is a continuous summary in \((0,p)\), not an integer model size. The
+sparsity calibration idea follows Piironen and Vehtari \cite{piironen2017};
+the algebra below uses our noise-scaled convention.
+
+At fixed \(\tau\), put \(t=\sqrt c\tau\). Since
+\(\lambda\sim\HC(0,1)\),
+\begin{align}
+ \E(\kappa\given\tau)
+ &=\frac2\pi\int_0^\infty
+       \frac{d\lambda}{(1+\lambda^2)(1+t^2\lambda^2)}
+   =\frac{1}{1+t},\\
+ \E(m_{\rm eff}\given\tau)&=p\frac{\sqrt c\tau}{1+\sqrt c\tau}.
+\end{align}
+Solving \(\E(m_{\rm eff}\given\tau_0)=p_0\) yields
+\begin{equation}\label{eq:tau0}
+ \tau_0=\frac{p_0}{p-p_0}\frac1{\sqrt c}.
+\end{equation}
+For columns with \(X_j\trans X_j=n\), a useful calibration is
+\begin{equation}\label{eq:stau}
+ s_\tau=\frac{p_0}{p-p_0}\frac1{\sqrt n},
+ \qquad \tau\sim\HC(0,s_\tau).
+\end{equation}
+For example, \(n=100,p=50,p_0=5\) gives \(s_\tau=1/90\).
+This is an illustrative choice of prior scale, not an empirical estimate.
+
+Equation \eqref{eq:tau0} equates an expectation with \emph{fixed}
+\(\tau=\tau_0\). Giving \(\tau\) a half-Cauchy prior with scale
+\(\tau_0\) does not make the fully averaged prior mean of \(m_{\rm eff}\)
+equal to \(p_0\). It sets a characteristic global scale (the half-Cauchy
+median), while retaining considerable uncertainty. Correlated designs and
+unequal column norms also make this a calibration heuristic rather than an
+exact model-size statement.
+
+\subsection{Why some references include a factor of \texorpdfstring{\(\sigma\)}{sigma}}
+
+An alternative writes
+\(\beta_j\given\tau_{\rm abs},\lambda_j\sim
+\Normal(0,\tau_{\rm abs}^2\lambda_j^2)\), with no explicit \(\sigma^2\)
+in the prior variance. Then the orthogonal shrinkage factor is
+\[
+ \kappa_j=\frac{1}{1+c_j\tau_{\rm abs}^2\lambda_j^2/\sigma^2},
+\]
+and the analogous reference scale is
+\(\tau_{{\rm abs},0}=\sigma p_0/\{(p-p_0)\sqrt n\}\).
+In our notation \(\tau_{\rm abs}=\sigma\tau\), so that factor of
+\(\sigma\) is already accounted for. Multiplying \eqref{eq:stau} by
+\(\sigma\) again would double-count it. An independent prior on
+\(\tau_{\rm abs}\) is also a different joint model from a prior on
+\(\tau\) independent of \(\sigma\).
+
+\subsection{The noise-variance prior}
+
+The main derivation uses positive \(a_\sigma,b_\sigma\). This makes the
+variance prior proper and keeps its units explicit: \(b_\sigma\) has units
+of response squared. If \(a_\sigma>1\), its mean is
+\(b_\sigma/(a_\sigma-1)\); if \(a_\sigma>2\), its variance is
+\(b_\sigma^2/\{(a_\sigma-1)^2(a_\sigma-2)\}\).
+
+Choose parameters using plausible noise levels on the analysis scale, and
+check the implied prior distribution. For example,
+\(\IG(2,s_0^2)\) has mean \(s_0^2\) but infinite variance; it is a specific
+heavy-tailed prior, not an automatically innocuous default. Very small
+inverse-gamma shape and scale values should not be called ``noninformative''
+without examining their implications.
+
+The common scale-invariant prior \(p(\sigma^2)\propto1/\sigma^2\) is
+improper. Its conditional formula is obtained formally by setting
+\(a_\sigma=b_\sigma=0\), but this is not a proper \(\IG(0,0)\)
+distribution. Properness of the resulting posterior must be established for
+the actual model and data; valid-looking conditional distributions alone do
+not prove it. A half-Cauchy prior on \(\sigma\) is another conjugately
+augmentable option, derived in Appendix \ref{app:variants}.
+
+\subsection{Prior predictive reasoning and sensitivity}
+
+The prior predicts a regression surface \(\alpha\ones_n+X\bbeta\) and
+responses around it. Ask whether the implied effect sizes and response ranges
+are scientifically plausible. A literal prior predictive distribution
+requires a proper intercept prior or a fixed baseline; the flat intercept
+prior in the main derivation cannot itself generate a proper prior predictive
+distribution.
+
+For a future fitted analysis, vary \(p_0\) or \(s_\tau\), the noise prior,
+and scientifically relevant predictor scaling choices. Compare substantive
+coefficient summaries, selected sets, and predictive performance. Sensitivity
+is especially important when the data weakly identify the global scale or
+when many predictors are strongly correlated.
+
+\section{What to compute from posterior draws}\label{sec:inference}
+
+Let \(s=1,\ldots,S\) index retained draws from adequately explored chains.
+For a posterior functional \(g\), a Monte Carlo approximation is
+\begin{equation}
+ \E[g(\theta)\given y,X]\ \approx\ \frac1S\sum_{s=1}^Sg(\theta^{(s)}),
+\end{equation}
+provided the relevant expectation exists. Dependence between draws affects
+Monte Carlo precision, which is measured through effective sample sizes and
+Monte Carlo standard errors rather than through \(S\) alone.
+
+\subsection{Coefficient summaries and uncertainty}
+
+Useful summaries include posterior medians, central credible intervals,
+probabilities of a positive effect, and probabilities of exceeding a
+scientifically meaningful magnitude. A posterior mean is useful under squared
+error loss when it exists. In weakly identified directions under heavy-tailed
+priors, moment existence and numerical stability should not be assumed from
+the fact that a finite Monte Carlo average can be calculated.
+
+A central \(100(1-\gamma)\%\) interval for \(\beta_j\) is the interval
+between its empirical \(\gamma/2\) and \(1-\gamma/2\) posterior quantiles.
+It describes uncertainty conditional on the model, data, and prior. It is not
+automatically a simultaneous statement about all \(p\) coefficients, and
+does not automatically have nominal repeated-sampling coverage.
+
+When using the orthogonal interpretation, summarize
+\(\kappa_j^{(s)}=1/\{1+c_j\tau^{2(s)}\lambda_j^{2(s)}\}\) and
+\(m_{\rm eff}^{(s)}=\sum_j(1-\kappa_j^{(s)})\). In general,
+\[
+ \E\left[\frac1{1+c_j\tau^2\lambda_j^2}\given y\right]
+ \ne \frac1{1+c_j\E(\tau^2\given y)\E(\lambda_j^2\given y)}.
+\]
+The right-hand side also relies on moments that may be unstable or absent.
+Compute the nonlinear quantity within each draw and then summarize it.
+
+\subsection{Posterior prediction}
+
+Transform a new predictor vector with the recorded training-data constants.
+For every posterior draw, compute
+\begin{equation}
+ \mu_*^{(s)}=\alpha^{(s)}+x_*\trans\bbeta^{(s)},\qquad
+ y_*^{(s)}=\mu_*^{(s)}+\sigma^{(s)}z_*^{(s)},\quad
+ z_*^{(s)}\sim\Normal(0,1).
+\end{equation}
+The distribution of \(\mu_*^{(s)}\) describes uncertainty about the conditional
+mean. The distribution of \(y_*^{(s)}\) additionally includes observation
+noise. For multiple new observations, use the same parameter draw for the
+whole vector and independent noise draws conditional on that state; parameter
+uncertainty then induces dependence between their predictive distributions.
+
+When the relevant moments exist, total variance gives
+\begin{equation}
+ \Var(y_*\given y,X)=\E(\sigma^2\given y,X)
+       +\Var(\alpha+x_*\trans\bbeta\given y,X).
+\end{equation}
+This identity explains why plugging in coefficients and adding only a noise
+interval understates predictive uncertainty.
+
+\subsection{A general-design measure of conditional complexity}
+
+For the penalized slopes, conditional fitted values use the matrix
+\(S_D=X(X\trans X+D^{-1})^{-1}X\trans\). Its trace
+\begin{equation}
+ d_{\rm eff}(D)=\tr(S_D)
+\end{equation}
+is a conditional smoothing-complexity summary. In the orthogonal case it is
+\(\sum_j(1-\kappa_j)\), but in a correlated design the trace accounts for
+joint directions in predictor space. It is not an exact count of selected
+variables and is not by itself the degrees of freedom of the fully adaptive
+posterior procedure. For centered predictors, an unpenalized estimated
+intercept contributes an additional one to the conditional smoother trace.
+
+\section{Variable selection is a posterior decision}\label{sec:selection}
+
+\subsection{Why there is no ordinary inclusion probability}
+
+With a proper posterior under the continuous horseshoe prior,
+\begin{equation}
+ \Prob(\beta_j=0\given y,X)=0,\qquad
+ \Prob(\beta_j\ne0\given y,X)=1.
+\end{equation}
+Neither probability ranks variables. A spike-and-slab model instead places
+a point mass at zero and can define a latent inclusion indicator. The
+ordinary horseshoe has no such indicator. Its proximity to sparse estimates
+does not turn \(1-\kappa_j\) into a posterior inclusion probability.
+
+A selection report should therefore state the event being judged, the
+threshold or loss, and whether the goal is scientific interpretation or a
+smaller predictive model.
+
+\subsection{Rule 1: exclusion of zero from a credible interval}
+
+One simple rule retains \(j\) if a chosen central credible interval for
+\(\beta_j\) excludes zero. Equivalently, for a continuous posterior, a
+central \(100(1-\gamma)\%\) interval excludes zero when
+\[
+ \Prob(\beta_j>0\given y)>1-\gamma/2
+ \quad\text{or}\quad
+ \Prob(\beta_j<0\given y)>1-\gamma/2.
+\]
+This rule rewards sign certainty. It can omit important but highly correlated
+predictors whose individual effects are uncertain. It also does not control
+the familywise error rate or the frequentist false discovery rate merely
+because each interval has a familiar nominal level.
+
+\subsection{Rule 2: practical relevance and an explicit loss}
+
+Choose a threshold \(\delta_j>0\) in meaningful coefficient units and define
+\begin{equation}
+ q_j=\Prob(|\beta_j|>\delta_j\given y,X)
+ \approx\frac1S\sum_s\ind\{|\beta_j^{(s)}|>\delta_j\}.
+\end{equation}
+Unlike exact nonzero probability, this is informative under a continuous
+prior. For standardized predictors, \(\delta_j\) can represent a minimum
+response change for a one-standard-deviation predictor change.
+
+Let \(d_j=1\) mean selecting predictor \(j\). Suppose a false selection
+costs \(C_{\rm FP}>0\), and missing a practically relevant effect costs
+\(C_{\rm FN}>0\). Under additive loss, the two posterior expected losses are
+\[
+ L(d_j=1\given y)=C_{\rm FP}(1-q_j),\qquad
+ L(d_j=0\given y)=C_{\rm FN}q_j.
+\]
+Select if and only if
+\begin{equation}\label{eq:selectionloss}
+ q_j>\frac{C_{\rm FP}}{C_{\rm FP}+C_{\rm FN}},
+\end{equation}
+with a declared convention at equality. This threshold follows from the
+specified loss, rather than from an arbitrary label of ``included.''
+
+For a nonempty reported set \(S_0\), the posterior expected fraction of
+practically negligible selected effects is
+\begin{equation}
+ \E\left[\frac{\sum_{j\in S_0}\ind\{|\beta_j|\leq\delta_j\}}
+                  {|S_0|}\given y,X\right]
+ =\frac1{|S_0|}\sum_{j\in S_0}(1-q_j).
+\end{equation}
+One may sort \(q_j\)'s and retain a largest prefix whose average
+\(1-q_j\) does not exceed a chosen tolerance. Linearity of expectation makes
+this formula valid without posterior independence. It is a Bayesian statement
+about practical-null events under the model, not an automatic frequentist
+false discovery guarantee.
+
+\subsection{Rule 3: a shrinkage-score threshold}
+
+An exploratory rule ranks variables by
+\(r_j=\E(1-\kappa_j\given y,X)\), possibly selecting those above a stated
+cutoff. This is easy to compute but depends on column scaling and on the
+orthogonal interpretation. A cutoff such as \(1/2\) is a convention unless
+justified by an explicit decision problem. Report it as a shrinkage-score
+rule, not as a posterior probability that the variable belongs to a model.
+
+\subsection{A smaller predictive model and the effect of correlation}
+
+If the goal is a compact predictor, a useful target is to approximate the
+full model's fitted or predictive distribution using fewer variables. For
+example, for a candidate subset \(S_0\) and each posterior draw, one can
+minimize
+\[
+ \min_{a,b_{S_0}}\frac1n
+ \norm{\alpha^{(s)}\ones_n+X\bbeta^{(s)}
+                -a\ones_n-X_{S_0}b_{S_0}}^2.
+\]
+This defines an empirical squared-error projection of the full fitted mean;
+it is not a complete predictive selection procedure by itself. Choosing a
+subset size still requires predictive assessment, and uncertainty or residual
+variance for the reduced predictor must account for approximation error.
+Perform subset search and tuning within training folds before evaluating on
+held-out data.
+
+In a correlated group, retaining one representative may preserve predictions
+even when the data cannot distinguish which member has an individual effect.
+For scientific interpretation, report that ambiguity, consider prespecified
+group contributions, and avoid interpreting a selected slope as a causal
+effect without additional assumptions.
+
+\key{What a transparent selection result should contain}
+State the preprocessing, prior, decision rule, interval level or practical
+threshold, selected set, and uncertainty summaries. Include sensitivity to
+reasonable thresholds and explain how correlated predictors were handled.
+If a reduced model is refitted, describe its new inferential target rather
+than treating the refit as the original horseshoe posterior.
+
+\section{Diagnostics and a validation plan}\label{sec:diagnostics}
+
+\subsection{Convergence and Monte Carlo accuracy}
+
+Use several independently seeded chains with dispersed reasonable starts.
+Inspect traces and between-chain agreement for coefficients, \(\log\tau\),
+\(\log\sigma\), representative local scales, fitted values, and important
+decisions. A coefficient near zero can look stable while its global and
+local scales remain highly dependent and explore slowly.
+
+Rank-normalized split \(\widehat R\), bulk effective sample size, and tail
+effective sample size are useful diagnostics for heavy-tailed posteriors
+\cite{vehtari2021}. Values of \(\widehat R\) close to one, often with a
+working target below \(1.01\), are screening criteria rather than proofs of
+convergence. Assess effective sample sizes and Monte Carlo errors for the
+actual reported quantities, including interval endpoints and selection-event
+probabilities. A threshold decision is unreliable if its Monte Carlo error
+is comparable to its distance from the threshold.
+
+Discard an initial transient based on exploration and diagnostics, and
+extend runs when necessary. Routine thinning discards information; it is
+mainly a storage choice, not a remedy for slow mixing. Prefer improving
+parameterization or block updates and keeping enough draws for accurate
+summaries. There is no single iteration count that guarantees adequacy for
+every design and signal configuration.
+
+\subsection{Posterior predictive checks}
+
+From retained states generate replicated observations
+\(y_i^{\rm rep,(s)}\sim
+\Normal(\alpha^{(s)}+x_i\trans\bbeta^{(s)},\sigma^{2(s)})\).
+Compare observed and replicated summaries that address the likelihood:
+residual spread versus fitted value, extreme residuals, skewness, and
+dependence across time or groups where relevant. A well-mixed chain can still
+fit a misspecified homoscedastic Gaussian model. Predictive checking and
+sampler convergence answer different questions.
+
+\subsection{Checks for a future implementation}
+
+The following are proposed checks, not completed experiments in these notes:
+\begin{enumerate}
+\item \textbf{Distribution convention.} At fixed \(a,b\), confirm that the
+inverse-gamma generator agrees with the reciprocal-gamma relationship, using
+quantiles rather than nonexistent moments when \(a\leq1\).
+\item \textbf{Gaussian block at fixed scales.} Compare sampled means and
+covariances against the exact normal target for a small problem. Use a
+non-diagonal precision so a transposed-Cholesky bug is detectable. Compare
+both Gaussian algorithms within Monte Carlo error.
+\item \textbf{Orthogonal reduction.} Check that the block sampler reproduces
+\eqref{eq:orthposterior} for orthogonal columns, with the correct column
+norm. Include \(c_j=n\), not only \(c_j=1\).
+\item \textbf{Conditional log densities.} Vary one block in
+\eqref{eq:jointkernel} while holding the others fixed and verify agreement,
+up to an additive constant, with its proposed full-conditional log density.
+This catches omitted normalizing factors.
+\item \textbf{Intercept and rank cases.} Compare the explicit and correctly
+integrated intercept formulations; include correlated, duplicated, and
+\(p>n\) designs. Check both predictions and noise-variance behavior.
+\item \textbf{End-to-end calibration.} With proper priors for every parameter,
+including the intercept, consider simulation-based calibration and comparisons
+with a separately implemented posterior method. Such tests must account for
+Monte Carlo dependence and uncertainty.
+\end{enumerate}
+
+\subsection{Reproducibility for future computational work}
+
+Any future simulations, benchmarks, or computational validation for this
+project should run as persistent jobs on \texttt{owls.stat.rice.edu}, after
+reading its applicable \texttt{AGENTS.md} instructions. Local editing and
+document compilation do not constitute a sampler experiment. These notes
+contain no claim that a numerical sampler has been run.
+
+A computational run should preserve the exact source and configuration,
+data/preprocessing description, random seeds and generator details, SHA-256
+hashes, launch command, scheduler or process identifiers, environment and
+package versions, timestamps, exit status, logs, generated data, retained
+draws, and diagnostic evidence. Conclusions should be based on inspected
+saved outputs. If the remote system is unavailable, report that fact instead
+of substituting a local experiment.
+
+\appendix
+\clearpage
+\section{Intercept integration and collapsed updates}\label{app:intercept}
+
+\subsection{Integrating out the flat intercept exactly}
+
+Assume \(n\geq2\), \(\ones_n\trans X=0\), and set
+\(y_c=y-\bar y\ones_n\). The residual identity is
+\[
+ \norm{y-\alpha\ones_n-X\bbeta}^2
+ =\norm{y_c-X\bbeta}^2+n(\alpha-\bar y)^2.
+\]
+Integrating the likelihood over \(\alpha\) introduces the factor
+\(\sqrt{2\pi\sigma^2/n}\). Therefore the integrated likelihood is
+\begin{equation}
+ p(y\given\bbeta,\sigma^2)\ \propto\
+ (\sigma^2)^{-(n-1)/2}
+ \exp\left\{-\frac{\norm{y_c-X\bbeta}^2}{2\sigma^2}\right\},
+\end{equation}
+where the proportionality reflects the arbitrary constant in the flat
+intercept prior. The coefficient update uses \(\widetilde y=y_c\), while
+the variance update is
+\begin{equation}\label{eq:integratedalpha}
+ \sigma^2\given\bbeta,D,y\sim
+ \IG\left(a_\sigma+\frac{n-1+p}{2},\ b_\sigma+
+           \frac{\norm{y_c-X\bbeta}^2+\bbeta\trans D^{-1}\bbeta}{2}\right).
+\end{equation}
+Other scale updates are unchanged. To recover intercept uncertainty, draw
+\(\alpha\sim\Normal(\bar y,\sigma^2/n)\) conditional on retained states.
+For uncentered predictors the analogous formula uses the centering projector
+\(M=I_n-\ones_n\ones_n\trans/n\), so replace \(X\) and \(y\) by
+\(MX\) and \(My\).
+
+Subtracting \(\bar y\) from the response but using an \(n\)-dimensional
+zero-intercept likelihood with the original \(n/2\) power of \(\sigma^2\)
+would instead treat the estimated baseline as known. That is a different
+variance calculation.
+
+\subsection{Integrating out the coefficients for a joint block}
+
+Hold \(\alpha,D\) fixed and integrate out \(\bbeta\). Normal convolution
+gives
+\begin{equation}
+ \widetilde y\given\sigma^2,D\sim\Normal_n(0,\sigma^2H),
+ \qquad H=I_n+XDX\trans.
+\end{equation}
+Therefore
+\begin{equation}\label{eq:collapsedbeta}
+ \sigma^2\given\alpha,D,y\sim
+ \IG\left(a_\sigma+\frac n2,\ b_\sigma+
+          \frac{\widetilde y\trans H^{-1}\widetilde y}{2}\right).
+\end{equation}
+Here there is no \(p/2\): the coefficients have actually been integrated
+out, including their normalizing factors. This explains how two variance
+updates with different shapes can both be correct for different conditionals.
+
+A valid joint-block replacement for the main sweep is:
+\begin{enumerate}
+\item update \(\alpha\) conditional on the current \(\bbeta,\sigma^2\);
+\item draw \(\sigma^2\) using \eqref{eq:collapsedbeta}, conditional on the
+      current \(\alpha,D\);
+\item immediately draw \(\bbeta\) using \eqref{eq:beta} with that new
+      \(\sigma^2\), before updating any scale conditioned on \(\bbeta\);
+\item update the local, global, and auxiliary scales as before.
+\end{enumerate}
+Steps 2--3 together draw from the joint conditional of
+\((\sigma^2,\bbeta)\). Inserting a collapsed variance formula somewhere
+inside an otherwise unchanged scan without respecting the relevant block
+ordering can produce an invalid chain.
+
+\subsection{Properness under the main variance prior}
+
+With \(n\geq1\), \(a_\sigma,b_\sigma>0\), proper scale priors, and the
+flat intercept prior, the posterior in the main model is proper. One way to
+see this is to integrate \(\alpha\) first. Its integrated likelihood is at
+most a constant times \((\sigma^2)^{-(n-1)/2}\), since the residual
+exponential is at most one. Integrating the proper coefficient and scale
+priors cannot increase that bound. Finally,
+\[
+ \int_0^\infty
+ (\sigma^2)^{-(n-1)/2}\,p(\sigma^2)\,d\sigma^2<\infty
+\]
+under a proper inverse-gamma prior with positive scale. The likelihood is
+positive for finite data, so the normalizing constant is also positive.
+This argument does not carry over automatically to
+\(p(\sigma^2)\propto1/\sigma^2\), and properness alone does not ensure
+existence of every posterior moment.
+
+\section{Alternative prior choices change specific updates}\label{app:variants}
+
+\subsection{A coefficient prior independent of the noise variance}
+
+Consider the explicitly different hierarchy
+\[
+ \bbeta\given\tau_{\rm abs}^2,\blambda^2
+ \sim\Normal_p(0,D_{\rm abs}),\qquad
+ D_{\rm abs}=\tau_{\rm abs}^2\diag(\lambda_j^2),
+\]
+with \(\tau_{\rm abs}\sim\HC(0,s_{\rm abs})\) independent of \(\sigma\).
+The likelihood, flat intercept prior, and proper inverse-gamma noise prior
+remain as in the main model. Using the analogous augmentation, the updated
+conditionals are
+\begin{align}
+ V&=(X\trans X/\sigma^2+D_{\rm abs}^{-1})^{-1},\nonumber\\
+ \bbeta\given\cdot&\sim\Normal_p\left(
+          VX\trans\widetilde y/\sigma^2,V\right),\\
+ \sigma^2\given\cdot&\sim\IG\left(a_\sigma+\frac n2,
+                         b_\sigma+\frac R2\right),\\
+ \lambda_j^2\given\cdot&\sim\IG\left(1,
+               \frac1{\nu_j}+\frac{\beta_j^2}{2\tau_{\rm abs}^2}\right),\\
+ \tau_{\rm abs}^2\given\cdot&\sim\IG\left(\frac{p+1}{2},
+               \frac1\xi+\frac12\sum_j\frac{\beta_j^2}{\lambda_j^2}\right),\\
+ \nu_j\given\cdot&\sim\IG(1,1+1/\lambda_j^2),\\
+ \xi\given\cdot&\sim\IG(1,1/s_{\rm abs}^2+1/\tau_{\rm abs}^2).
+\end{align}
+The intercept update is unchanged. Relative to the main model, the noise
+update loses both the coefficient-prior penalty and the \(p/2\) shape
+contribution; the local and global updates lose their \(\sigma^2\) factors.
+One cannot mix this variance update with the main model's coefficient update.
+
+\subsection{A half-Cauchy prior on the noise standard deviation}
+
+Return to the main, noise-scaled coefficient prior, but replace
+\eqref{eq:otherpriors}'s variance prior by
+\[
+ \sigma\sim\HC(0,s_\sigma),\qquad
+ \sigma^2\given\eta\sim\IG(1/2,1/\eta),\qquad
+ \eta\sim\IG(1/2,1/s_\sigma^2).
+\]
+The resulting updates are
+\begin{align}
+ \sigma^2\given\cdot&\sim
+ \IG\left(\frac{n+p+1}{2},\frac1\eta+\frac{R+Q}{2}\right),\\
+ \eta\given\cdot&\sim\IG\left(1,\frac1{s_\sigma^2}+\frac1{\sigma^2}\right).
+\end{align}
+All other main-model conditionals are unchanged. These formulas condition on
+the explicit intercept. The appropriate residual-dimension change is needed
+if the intercept is integrated out. Because the variance prior now behaves
+differently near zero, the inverse-gamma properness bound in Appendix
+\ref{app:intercept} should not be applied without checking its assumptions.
+
+\subsection{Fixing the global scale}
+
+If \(\tau=\tau_0>0\) is fixed by the model, omit both the \(\tau^2\) and
+\(\xi\) updates. Keep the remaining conditionals with that fixed value.
+This is a useful mathematically simpler model, but it excludes posterior
+uncertainty about global shrinkage. Choosing \(\tau_0\) by an optimization
+or empirical-Bayes step is a separate procedure and should be reported.
+
+\subsection{The regularized horseshoe}
+
+The regularized horseshoe adds control over the largest coefficient scales
+\cite{piironen2017}. In a noise-scaled convention, one possible form is
+\begin{equation}
+ \widetilde\lambda_j^2
+  =\frac{c^2\lambda_j^2}{c^2+\tau^2\lambda_j^2},\qquad
+ \beta_j\given\cdot\sim
+ \Normal(0,\sigma^2\tau^2\widetilde\lambda_j^2),\qquad c>0.
+\end{equation}
+For \(\tau^2\lambda_j^2\ll c^2\), this approximately recovers the ordinary
+horseshoe variance. For \(\tau^2\lambda_j^2\gg c^2\), the variance tends
+to \(\sigma^2c^2\), limiting the scale of very large effects. Here \(c\)
+is measured relative to the noise standard deviation; a slab width in
+absolute response units requires a corresponding reparameterization.
+
+This modification changes the prior normalization as a function of
+\(\lambda_j^2\) and \(\tau^2\). The simple inverse-gamma local and global
+updates derived for the ordinary horseshoe no longer apply unchanged.
+Re-derive the target and use an appropriate sampler; substituting
+\(\widetilde\lambda_j^2\) in one line of the ordinary Gibbs sweep is not
+a valid derivation.
+
+\clearpage
+\section{A one-predictor conditional example}\label{app:example}
+
+To make each quantity concrete, suppose one centered predictor has
+\(X\trans X=20\), and the currently intercept-adjusted response satisfies
+\(X\trans\widetilde y=10\) and \(\widetilde y\trans\widetilde y=15\).
+Take a current state \(\sigma^2=2,\tau^2=0.25,\lambda^2=4\).
+Then \(D=1\), \(A=21\), and the coefficient update is
+\[
+ \beta\given\cdot\sim\Normal(10/21,\,2/21).
+\]
+The unregularized coordinate estimate is \(10/20=0.5\); its conditional
+shrinkage factor is \(\kappa=1/21\), so its conditional posterior mean
+is \((20/21)0.5=10/21\), agreeing with the matrix calculation.
+
+For illustration of the next conditional, evaluate the formulas at
+\(\beta=0.4\), with \(n=20,p=1,a_\sigma=2,b_\sigma=1\). The residual
+sum of squares and prior penalty are
+\[
+ R=15-2(0.4)(10)+(0.4)^2(20)=10.2,\qquad Q=(0.4)^2=0.16.
+\]
+Thus
+\[
+ \sigma^2\given\cdot\sim\IG\left(12.5,\,6.18\right).
+\]
+If evaluating the local-scale conditional at \(\nu=1\) and \(\sigma^2=2\),
+while holding \(\tau^2=0.25\), then
+\[
+ \lambda^2\given\cdot\sim\IG\left(1,\,
+ 1+\frac{0.16}{2(2)(0.25)}\right)=\IG(1,1.16).
+\]
+These are separate conditional evaluations at stated values, not successive
+realized Gibbs draws. In an actual sweep, the local-scale update must use
+the newly drawn noise variance. No random experiment is being reported here.
+
+\clearpage
+\section{Quick reference for the main sampler}\label{app:quick}
+
+\textbf{Model.} Explicit flat-prior intercept; noise-scaled coefficient prior;
+\(\sigma^2\sim\IG(a_\sigma,b_\sigma)\);
+\(\lambda_j\sim\HC(0,1)\); \(\tau\sim\HC(0,s_\tau)\).
+The inverse-gamma density is proportional to \(z^{-a-1}e^{-b/z}\).
+
+\textbf{Definitions.}
+\begin{align*}
+ D&=\tau^2\diag(\lambda_1^2,\ldots,\lambda_p^2),
+ &A&=X\trans X+D^{-1},\\
+ \widetilde y&=y-\alpha\ones_n,
+ &m&=A^{-1}X\trans\widetilde y,\\
+ R&=\norm{\widetilde y-X\bbeta}^2,
+ &Q&=\sum_j\frac{\beta_j^2}{\tau^2\lambda_j^2}.
+\end{align*}
+
+\textbf{Full conditionals.} In a sequential scan, always use current values.
+\begin{align*}
+ \alpha\given\cdot&\sim\Normal\left(
+        \frac{\ones_n\trans(y-X\bbeta)}n,\frac{\sigma^2}n\right),\\[4pt]
+ \bbeta\given\cdot&\sim\Normal_p(m,\sigma^2A^{-1}),\\[4pt]
+ \sigma^2\given\cdot&\sim\IG\left(a_\sigma+\frac{n+p}{2},
+                               b_\sigma+\frac{R+Q}{2}\right),\\[4pt]
+ \lambda_j^2\given\cdot&\sim\IG\left(1,
+                    \frac1{\nu_j}+\frac{\beta_j^2}{2\sigma^2\tau^2}\right),\\[4pt]
+ \tau^2\given\cdot&\sim\IG\left(\frac{p+1}{2},
+                \frac1\xi+\frac1{2\sigma^2}\sum_j\frac{\beta_j^2}{\lambda_j^2}\right),\\[4pt]
+ \nu_j\given\cdot&\sim\IG\left(1,1+\frac1{\lambda_j^2}\right),\\[4pt]
+ \xi\given\cdot&\sim\IG\left(1,\frac1{s_\tau^2}+\frac1{\tau^2}\right).
+\end{align*}
+
+\textbf{Interpretation.} Small \(\tau\) encourages global shrinkage; large
+\(\lambda_j\) allows a local exception. An orthogonal-design shrinkage factor
+is \(\kappa_j=1/\{1+(X_j\trans X_j)\tau^2\lambda_j^2\}\).
+The horseshoe is continuous; exact-zero selection requires a separate
+decision rule or a different prior.
+
+\textbf{Most consequential mistakes.} Confusing gamma rate and scale;
+omitting the \(p/2\) or \(Q\) term in the main noise update; shrinking the
+intercept unintentionally; forgetting column norms in \(\kappa_j\);
+using the wrong Cholesky transpose; replacing random draws by means;
+simultaneously updating dependent blocks with stale states; and reporting a
+shrinkage score as an inclusion probability.
+
+\clearpage
+\phantomsection
+\addcontentsline{toc}{section}{References}
+\begin{thebibliography}{9}
+\raggedright
+\bibitem{carvalho2009}
+Carvalho, C. M., Polson, N. G., and Scott, J. G. (2009).
+Handling sparsity via the horseshoe.
+\emph{Proceedings of the Twelfth International Conference on Artificial
+Intelligence and Statistics}, PMLR \textbf{5}, 73--80.
+\href{https://proceedings.mlr.press/v5/carvalho09a.html}{Paper and open-access PDF}.
+
+\bibitem{carvalho2010}
+Carvalho, C. M., Polson, N. G., and Scott, J. G. (2010).
+The horseshoe estimator for sparse signals.
+\emph{Biometrika}, \textbf{97}(2), 465--480.
+\href{https://doi.org/10.1093/biomet/asq017}{doi:10.1093/biomet/asq017}.
+
+\bibitem{makalic2016}
+Makalic, E. and Schmidt, D. F. (2016).
+A simple sampler for the horseshoe estimator.
+\emph{IEEE Signal Processing Letters}, \textbf{23}(1), 179--182.
+\href{https://doi.org/10.1109/LSP.2015.2503725}{doi:10.1109/LSP.2015.2503725}.
+\href{https://arxiv.org/abs/1508.03884}{Open-access preprint}.
+
+\bibitem{bhattacharya2016}
+Bhattacharya, A., Chakraborty, A., and Mallick, B. K. (2016).
+Fast sampling with Gaussian scale-mixture priors in high-dimensional regression.
+\emph{Biometrika}, \textbf{103}(4), 985--991.
+\href{https://doi.org/10.1093/biomet/asw042}{doi:10.1093/biomet/asw042}.
+\href{https://arxiv.org/abs/1506.04778}{Open-access preprint}.
+
+\bibitem{piironen2017}
+Piironen, J. and Vehtari, A. (2017).
+Sparsity information and regularization in the horseshoe and other shrinkage priors.
+\emph{Electronic Journal of Statistics}, \textbf{11}(2), 5018--5051.
+\href{https://doi.org/10.1214/17-EJS1337SI}{doi:10.1214/17-EJS1337SI}.
+\href{https://arxiv.org/abs/1707.01694}{Open-access preprint}.
+
+\bibitem{vehtari2021}
+Vehtari, A., Gelman, A., Simpson, D., Carpenter, B., and B\"urkner, P.-C. (2021).
+Rank-normalization, folding, and localization: An improved
+\(\widehat R\) for assessing convergence of MCMC (with discussion).
+\emph{Bayesian Analysis}, \textbf{16}(2), 667--718.
+\href{https://doi.org/10.1214/20-BA1221}{doi:10.1214/20-BA1221}.
+\href{https://arxiv.org/abs/1903.08008}{Open-access preprint}.
+\end{thebibliography}
+\end{document}
