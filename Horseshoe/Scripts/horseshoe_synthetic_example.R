@@ -79,40 +79,39 @@ print(round(data.frame(true = beta_true, horseshoe = beta_hat, ols = ols,
 sink()
 
 # ---- Plots ------------------------------------------------------------------
-# Each plot is saved as a PNG in results/ and also shown on screen in R.
-save_plot <- function(file, draw) {
-  png(file.path("results", file), width = 1400, height = 900, res = 150)
-  draw()
-  dev.off()
-  if (interactive()) draw()
+# Plots are drawn on screen and copied to results/ with dev.copy().
+# Under Rscript there is no screen, so draw to a recording null device instead.
+if (!interactive()) {
+  pdf(NULL)
+  dev.control("enable")
 }
 
 # 1. Estimates vs truth
-save_plot("estimates.png", function() {
-  plot(1:p, beta_hat, pch = 19, ylim = range(ci, ols),
-       xlab = "j", ylab = "beta", main = "Horseshoe estimates and 95% CIs")
-  segments(1:p, ci[1, ], 1:p, ci[2, ])
-  points(1:p, beta_true, pch = 4, col = "red", cex = 1.5)
-  points(1:p, ols, col = "grey")
-  abline(h = 0, lty = 2)
-  legend("topright", c("horseshoe", "truth", "OLS"),
-         pch = c(19, 4, 1), col = c("black", "red", "grey"))
-})
+plot(1:p, beta_hat, pch = 19, ylim = range(ci, ols),
+     xlab = "j", ylab = "beta", main = "Horseshoe estimates and 95% CIs")
+segments(1:p, ci[1, ], 1:p, ci[2, ])
+points(1:p, beta_true, pch = 4, col = "red", cex = 1.5)
+points(1:p, ols, col = "grey")
+abline(h = 0, lty = 2)
+legend("topright", c("horseshoe", "truth", "OLS"),
+       pch = c(19, 4, 1), col = c("black", "red", "grey"))
+dev.copy(png, "results/estimates.png", width = 1400, height = 900, res = 150)
+dev.off()
 
 # 2. Trace plots
-save_plot("traces.png", function() {
-  par(mfrow = c(2, 2))
-  plot(fit$beta[, 1], type = "l", main = "beta 1 (true 3)", ylab = "")
-  plot(fit$beta[, 35], type = "l", main = "beta 35 (true -0.5)", ylab = "")
-  plot(log(sqrt(fit$tau2)), type = "l", main = "log tau", ylab = "")
-  plot(sqrt(fit$sigma2), type = "l", main = "sigma", ylab = "")
-  par(mfrow = c(1, 1))
-})
+par(mfrow = c(2, 2))
+plot(fit$beta[, 1], type = "l", main = "beta 1 (true 3)", ylab = "")
+plot(fit$beta[, 35], type = "l", main = "beta 35 (true -0.5)", ylab = "")
+plot(log(sqrt(fit$tau2)), type = "l", main = "log tau", ylab = "")
+plot(sqrt(fit$sigma2), type = "l", main = "sigma", ylab = "")
+dev.copy(png, "results/traces.png", width = 1400, height = 900, res = 150)
+dev.off()
+par(mfrow = c(1, 1))
 
 # 3. Posterior densities: a signal vs a null coefficient
-save_plot("densities.png", function() {
-  plot(density(fit$beta[, 20]), xlim = c(-0.5, 1.5),
-       main = "Posterior: beta 20 (signal) vs beta 2 (null)")
-  lines(density(fit$beta[, 2]), col = "blue")
-  abline(v = c(0, 1), col = c("blue", "black"), lty = 2)
-})
+plot(density(fit$beta[, 20]), xlim = c(-0.5, 1.5),
+     main = "Posterior: beta 20 (signal) vs beta 2 (null)")
+lines(density(fit$beta[, 2]), col = "blue")
+abline(v = c(0, 1), col = c("blue", "black"), lty = 2)
+dev.copy(png, "results/densities.png", width = 1400, height = 900, res = 150)
+dev.off()
